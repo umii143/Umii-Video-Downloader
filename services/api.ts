@@ -2,10 +2,6 @@ import axios from 'axios';
 import { VideoData } from '../types';
 
 // Detect environment: 
-// On Vercel (Production), we use relative path '/api' which routes to api/index.py
-// On Local, we use 'http://localhost:8000/api' if the user is running the python server separately,
-// OR if using `vite proxy`, relative path would work too. 
-// For safety, we check if we are on localhost.
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL = isLocal ? 'http://localhost:8000/api' : '/api';
 
@@ -14,13 +10,15 @@ export const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 8000, // Increased timeout for serverless cold starts
+  // Increased timeout to 25s. 
+  // Vercel Free tier limits to 10s server-side, but this ensures client doesn't give up too early 
+  // if you upgrade plans or run locally.
+  timeout: 25000, 
 });
 
-// Mock data for demo/fallback purposes
 const MOCK_DATA: VideoData = {
   id: 'demo-video-1',
-  title: 'Backend Unavailable: Showing Demo Video (Big Buck Bunny)',
+  title: 'Demo Mode: Backend Disconnected (Localhost)',
   thumbnail: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/800px-Big_buck_bunny_poster_big.jpg',
   duration: 596,
   platform: 'Demo Mode',
@@ -35,28 +33,51 @@ export const fetchVideoInfo = async (url: string): Promise<VideoData> => {
       params: { url },
     });
     return response.data;
-  } catch (error) {
-    console.warn('Backend unavailable or Vercel timeout, falling back to demo mode:', error);
+  } catch (error: any) {
+    console.warn('API Error:', error);
     
-    // Simulate network delay for realistic UX
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // CASE 1: Server Responded with Error (4xx, 5xx)
+    if (error.response) {
+      const status = error.response.status;
+      const detail = error.response.data?.detail;
+
+      if (status === 504) {
+        throw new Error("Server Timeout: The video took too long to process. TikTok might be slow right now.");
+      }
+      if (status === 403) {
+         throw new Error(detail || "Access Denied: The server was blocked by the platform.");
+      }
+      
+      throw new Error(detail || `Server Error (${status}): Please try again.`);
+    } 
     
-    // Return mock data so the UI can be tested/viewed
-    return {
-      ...MOCK_DATA,
-      // Update title to reflect the user's input so it feels responsive
-      title: `DEMO RESULT: ${url.slice(0, 30)}${url.length > 30 ? '...' : ''}`,
-    };
+    // CASE 2: Network Error (Request made, no response)
+    else if (error.request) {
+      // Only fallback to Mock Data if we are on Localhost (developers machine)
+      // On Production/Vercel, we want to show the real "Network Error" to debug.
+      if (isLocal) {
+        console.warn('Local backend unavailable, showing demo data.');
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        return {
+          ...MOCK_DATA,
+          title: `DEMO RESULT: ${url.slice(0, 30)}...`,
+        };
+      }
+      
+      throw new Error("Network Error: Could not reach the backend. Please check your internet connection.");
+    } 
+    
+    // CASE 3: Setup Error
+    else {
+      throw new Error(error.message || 'Unknown Error occurred.');
+    }
   }
 };
 
 export const getDownloadLink = (videoData: VideoData): string => {
-  // If we are in mock mode, return the direct URL (the proxy won't work)
   if (videoData.isMock) {
     return videoData.download_url;
   }
-
-  // Construct the proxy URL
   const params = new URLSearchParams({
     url: videoData.download_url,
     title: videoData.title,
